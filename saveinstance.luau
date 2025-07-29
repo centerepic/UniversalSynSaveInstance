@@ -3,6 +3,119 @@
 --!divine-intellect
 -- https://discord.gg/wx4ThpAsmw
 
+-- Decompilation prepass
+
+local odecompile = getgenv().decompile
+local MaxDecompilationJobs = 20
+local DecompilationTimeout = 60
+local DecompilationWorkers = {}
+local DecompilationCache = {}
+
+if odecompile then
+	local RunService = game:GetService("RunService")
+	local Text = Drawing.new("Text")
+	Text.TextSize = 20
+	Text.Color = Color3.fromRGB(255, 234, 187)
+	Text.Text = "Decompilation pre-pass in progress..."
+	Text.Position = Vector2.new(10, 10)
+
+	local function Status(s: string)
+		Text.Text = s
+	end
+
+	local Scripts = {}
+	for _, v in next, game:GetDescendants() do
+		if v:IsA("BaseScript") or v:IsA("ModuleScript") then
+			table.insert(Scripts, v)
+		end
+	end
+
+	local Amount = #Scripts
+
+	-- Initialize decompilation workers
+	-- Use Scripts as a queue to pop targets and insert them into workers
+	for i = 1, MaxDecompilationJobs do
+		local Worker = {
+			Status = "Working",
+		}
+
+		Worker.Thread = coroutine.create(function()
+			while #Scripts > 0 do
+				local Script = table.remove(Scripts, 1)
+				if Script and (Script:IsA("BaseScript") or Script:IsA("ModuleScript")) then
+					local success, result = pcall(function()
+						local decompileThread = coroutine.create(odecompile)
+						local startTime = os.clock()
+						local ok, res
+
+						task.spawn(function()
+							ok, res = coroutine.resume(decompileThread, Script)
+						end)
+
+						while coroutine.status(decompileThread) ~= "dead" do
+							if os.clock() - startTime > DecompilationTimeout then
+								-- task.cancel(decompileThread) -- Not a real thread
+								return nil, "Decompilation timed out"
+							end
+							task.wait()
+						end
+
+						if ok then
+							return res
+						else
+							return nil, res
+						end
+					end)
+
+					if success and result then
+						DecompilationCache[Script] = result
+					end
+				end
+			end
+			Worker.Status = "Finished"
+		end)
+
+		table.insert(DecompilationWorkers, Worker)
+	end
+
+	-- Wait for all workers to finish and update status
+	local function WaitForWorkers()
+		while true do
+			local AllFinished = true
+			for _, Worker in next, DecompilationWorkers do
+				if Worker.Status ~= "Finished" then
+					AllFinished = false
+					break
+				end
+			end
+
+			if AllFinished then
+				break
+			end
+
+			Status("Decompiling... " .. (#Scripts + 1) .. "/" .. Amount)
+			RunService.RenderStepped:Wait()
+		end
+
+		Status("Decompilation complete!")
+		Text:Remove()
+	end
+
+	for _, Worker in next, DecompilationWorkers do
+		coroutine.resume(Worker.Thread)
+	end
+
+	WaitForWorkers()
+
+	getgenv().decompile = function(Script)
+		if DecompilationCache[Script] then
+			return DecompilationCache[Script]
+		else
+			return odecompile(Script)
+		end
+	end
+end
+
 local function string_find(s, pattern)
 	return string.find(s, pattern, nil, true)
 end
