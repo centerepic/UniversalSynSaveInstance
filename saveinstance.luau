@@ -6,18 +6,34 @@
 -- Decompilation prepass
 
 local odecompile = getgenv().decompile
-local MaxDecompilationJobs = 20
-local DecompilationTimeout = 60
+local MaxDecompilationJobs = 50
+local DecompilationTimeout = 15
 local DecompilationWorkers = {}
 local DecompilationCache = {}
+local DecompilationHashIndex = {}
+local DecompileIgnore = {
+	game:GetService("TextChatService"),
+	game:GetService("CoreGui"),
+	game:GetService("CorePackages")
+}
+
+local function GenerateCheckSum(x)
+	local Sum = 0
+	for i = 1, #x do
+		Sum += string.byte(x, i) * i
+	end
+	return Sum
+end
 
 if odecompile then
+	-- print('Initializing pre-pass')
 	local RunService = game:GetService("RunService")
 	local Text = Drawing.new("Text")
-	Text.TextSize = 20
+	Text.Size = 20
 	Text.Color = Color3.fromRGB(255, 234, 187)
 	Text.Text = "Decompilation pre-pass in progress..."
 	Text.Position = Vector2.new(10, 10)
+	Text.Visible = true
 
 	local function Status(s: string)
 		Text.Text = s
@@ -26,14 +42,26 @@ if odecompile then
 	local Scripts = {}
 	for _, v in next, game:GetDescendants() do
 		if v:IsA("BaseScript") or v:IsA("ModuleScript") then
-			table.insert(Scripts, v)
+
+			local Ignore = false
+
+			for _, IgnoreDescendants in next, DecompileIgnore do
+				if v:IsDescendantOf(IgnoreDescendants) then
+					Ignore = true
+					break
+				end
+			end
+
+			if not Ignore then
+				table.insert(Scripts, v)
+			end
 		end
 	end
 
 	local Amount = #Scripts
+	-- print(Amount, "to decompile.")
 
 	-- Initialize decompilation workers
-	-- Use Scripts as a queue to pop targets and insert them into workers
 	for i = 1, MaxDecompilationJobs do
 		local Worker = {
 			Status = "Working",
@@ -43,32 +71,51 @@ if odecompile then
 			while #Scripts > 0 do
 				local Script = table.remove(Scripts, 1)
 				if Script and (Script:IsA("BaseScript") or Script:IsA("ModuleScript")) then
-					local success, result = pcall(function()
-						local decompileThread = coroutine.create(odecompile)
-						local startTime = os.clock()
-						local ok, res
 
-						task.spawn(function()
-							ok, res = coroutine.resume(decompileThread, Script)
-						end)
+					-- Check that the script isn't a server script
+					if Script.ClassName == "Script" and Script.RunContext ~= Enum.RunContext.Client then
+						continue
+					end
 
-						while coroutine.status(decompileThread) ~= "dead" do
-							if os.clock() - startTime > DecompilationTimeout then
-								-- task.cancel(decompileThread) -- Not a real thread
-								return nil, "Decompilation timed out"
-							end
-							task.wait()
-						end
+					local StartTime = os.clock()
+					local Success, Result = nil, nil
 
-						if ok then
-							return res
-						else
-							return nil, res
-						end
+					local BytecodeSuccess, Bytecode = pcall(function()
+						return getscriptbytecode(Script)
 					end)
 
-					if success and result then
-						DecompilationCache[Script] = result
+					if not BytecodeSuccess or not Bytecode then
+						-- warn("Failed to get bytecode for script:", Script:GetFullName())
+						continue
+					end
+
+					local Hash = tostring(GenerateCheckSum(crypt.base64encode(Bytecode)))
+
+					-- Check if we've already decompiled this script
+					if DecompilationHashIndex[Hash] then
+						DecompilationCache[Script] = DecompilationHashIndex[Hash]
+						continue
+					end
+
+					local DecompilationTask = coroutine.create(function()
+						Success, Result = pcall(odecompile, Script)
+					end)
+
+					coroutine.resume(DecompilationTask)
+
+					repeat
+						task.wait()
+						if os.clock() - StartTime > DecompilationTimeout then
+							Success = false
+							Result = nil
+							-- warn("Decompilation timed out for script:", Script:GetFullName())
+							break
+						end
+					until Success
+
+					if Success and Result then
+						DecompilationHashIndex[Hash] = Result
+						DecompilationCache[Script] = Result
 					end
 				end
 			end
@@ -76,9 +123,10 @@ if odecompile then
 		end)
 
 		table.insert(DecompilationWorkers, Worker)
+		print("Initialized decompilation worker", i)
 	end
 
-	-- Wait for all workers to finish and update status
+	-- Handle workers
 	local function WaitForWorkers()
 		while true do
 			local AllFinished = true
@@ -90,10 +138,12 @@ if odecompile then
 			end
 
 			if AllFinished then
+				print('Done!')
 				break
 			end
 
-			Status("Decompiling... " .. (#Scripts + 1) .. "/" .. Amount)
+			Status("Decompiling... " .. (Amount - #Scripts) .. "/" .. Amount)
+			Text.Position = Vector2.new(workspace.CurrentCamera.ViewportSize.X - Text.TextBounds.X - 10, 10)
 			RunService.RenderStepped:Wait()
 		end
 
@@ -1844,7 +1894,7 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 		NilInstances = false,
 		NilInstancesFixes = {},
 
-		SaveCacheInterval = 0x1600 * 10,
+		SaveCacheInterval = 0x1600 * 20,
 		ShowStatus = true,
 		SafeMode = false,
 		ShutdownWhenDone = false,
